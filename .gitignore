@@ -1,0 +1,28 @@
+# 虛擬環境
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 敏感資料 - 重要！不要上傳這些
+.env
+seen_posts.json
+
+# 日誌檔案
+*.log
+
+# VS Code
+.vscode/settings.json
+
+# 作業系統
+.DS_Store
+Thumbs.db
+
+# 測試文件
+test.*
