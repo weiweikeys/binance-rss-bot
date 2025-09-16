@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-幣安公告監控Telegram Bot (Web Scraping版本)
-由於RSS不可用，改用網頁解析方式
+幣安中文內容監控Bot
+監控多個來源，尋找"上線"相關內容
 """
 
 import requests
@@ -13,6 +13,7 @@ import argparse
 import logging
 from datetime import datetime
 from config import Config
+import re
 
 # 設定日誌
 logging.basicConfig(
@@ -25,8 +26,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BinanceWebScraperBot:
-    """幣安公告監控Bot (網頁解析版)"""
+class BinanceChineseMonitor:
+    """幣安中文內容監控Bot"""
     
     def __init__(self):
         """初始化Bot"""
@@ -36,13 +37,40 @@ class BinanceWebScraperBot:
             self.chat_id = Config.TELEGRAM_CHAT_ID
             self.check_interval = Config.CHECK_INTERVAL
             
-            # 改用網頁URL
-            self.web_url = "https://www.binance.com/en/support/announcement/new-listing"
+            # 監控來源 - 使用可以訪問的中文來源
+            self.sources = [
+                {
+                    'name': '幣安中文公告',
+                    'url': 'https://www.binance.com/zh-CN/support/announcement',
+                    'type': 'web',
+                    'enabled': True
+                },
+                {
+                    'name': '幣安微博',
+                    'url': 'https://weibo.com/binance',
+                    'type': 'web', 
+                    'enabled': False  # 微博也有限制，先禁用
+                },
+                {
+                    'name': 'CoinGecko中文',
+                    'url': 'https://www.coingecko.com/zh/new-cryptocurrencies',
+                    'type': 'web',
+                    'enabled': True
+                }
+            ]
+            
+            # 關鍵字設定
+            self.keywords = [
+                '上線', '新上線', '即將上線', '開始交易',
+                '新增', '支持', '開放', '推出',
+                'listing', 'new trading', 'support'
+            ]
+            
             self.seen_posts_file = "seen_posts.json"
             self.seen_posts = self.load_seen_posts()
             
-            logger.info("🤖 Bot初始化完成 (網頁解析版)")
-            logger.info(f"🌐 監控網址: {self.web_url}")
+            logger.info("🤖 Bot初始化完成 (中文內容監控版)")
+            logger.info(f"🔍 關鍵字: {', '.join(self.keywords)}")
             logger.info(f"⏰ 檢查間隔: {self.check_interval}秒")
             
         except Exception as e:
@@ -50,12 +78,12 @@ class BinanceWebScraperBot:
             raise
     
     def load_seen_posts(self):
-        """載入已處理的文章ID"""
+        """載入已處理的內容"""
         try:
             if os.path.exists(self.seen_posts_file):
                 with open(self.seen_posts_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    logger.info(f"📚 載入了 {len(data)} 個已處理的文章記錄")
+                    logger.info(f"📚 載入了 {len(data)} 個已處理的記錄")
                     return set(data)
             return set()
         except Exception as e:
@@ -63,11 +91,10 @@ class BinanceWebScraperBot:
             return set()
     
     def save_seen_posts(self):
-        """儲存已處理的文章ID"""
+        """儲存已處理的內容"""
         try:
             with open(self.seen_posts_file, 'w', encoding='utf-8') as f:
                 json.dump(list(self.seen_posts), f, ensure_ascii=False, indent=2)
-            logger.debug(f"💾 已儲存 {len(self.seen_posts)} 個文章記錄")
         except Exception as e:
             logger.error(f"❌ 儲存歷史記錄失敗: {e}")
     
@@ -87,204 +114,230 @@ class BinanceWebScraperBot:
                 logger.info("✅ 訊息發送成功")
                 return True
             else:
-                logger.error(f"❌ 發送失敗 ({response.status_code}): {response.text}")
+                logger.error(f"❌ 發送失敗: {response.text}")
                 return False
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ 網路錯誤: {e}")
-            return False
         except Exception as e:
             logger.error(f"❌ 發送錯誤: {e}")
             return False
     
-    def test_telegram_connection(self):
-        """測試Telegram連接"""
-        test_message = f"""
-🧪 <b>Telegram連接測試 (網頁解析版)</b>
-
-✅ Bot運行正常
-📅 測試時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-🌐 改用網頁解析方式監控
-🤖 準備開始監控幣安公告！
-        """.strip()
+    def contains_keywords(self, text):
+        """檢查是否包含關鍵字"""
+        if not text:
+            return False, []
         
-        logger.info("🔍 測試Telegram連接...")
-        success = self.send_telegram_message(test_message)
+        text_lower = text.lower()
+        found_keywords = []
         
-        if success:
-            logger.info("✅ Telegram連接測試成功！")
-        else:
-            logger.error("❌ Telegram連接測試失敗！請檢查Token和Chat ID")
+        for keyword in self.keywords:
+            if keyword.lower() in text_lower:
+                found_keywords.append(keyword)
         
-        return success
+        return len(found_keywords) > 0, found_keywords
     
-    def scrape_announcements(self):
-        """抓取幣安公告頁面"""
+    def scrape_binance_chinese(self):
+        """抓取幣安中文公告"""
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
         
         try:
-            logger.debug(f"🌐 正在抓取網頁: {self.web_url}")
-            response = requests.get(self.web_url, headers=headers, timeout=15)
+            response = requests.get(
+                'https://www.binance.com/zh-CN/support/announcement', 
+                headers=headers, 
+                timeout=15,
+                allow_redirects=True
+            )
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # 查找公告列表 (這部分需要根據實際HTML結構調整)
+            # 查找公告標題
             announcements = []
             
-            # 常見的公告容器選擇器
+            # 多種可能的選擇器
             selectors = [
-                '.announcement-item',
-                '.news-item', 
-                'article',
-                '[class*="announcement"]',
-                '[class*="news"]'
+                'a[href*="announcement"]',
+                '.announcement-title',
+                '[class*="title"]',
+                'h1, h2, h3, h4',
+                'a[href*="support"]'
             ]
             
             for selector in selectors:
-                items = soup.select(selector)
-                if items:
-                    logger.info(f"📄 找到 {len(items)} 個公告項目 (使用選擇器: {selector})")
-                    for item in items[:10]:  # 只取前10個
-                        try:
-                            # 嘗試提取標題和連結
-                            title_elem = item.find(['h1', 'h2', 'h3', 'h4', 'a'])
-                            if title_elem:
-                                title = title_elem.get_text().strip()
-                                link = title_elem.get('href') if title_elem.name == 'a' else item.find('a')
-                                if link and hasattr(link, 'get'):
-                                    link = link.get('href')
-                                if link and not link.startswith('http'):
-                                    link = f"https://www.binance.com{link}"
-                                
-                                # 簡單的ID生成
-                                post_id = hash(title + str(link))
-                                
+                elements = soup.select(selector)
+                if elements:
+                    logger.info(f"使用選擇器找到 {len(elements)} 個元素: {selector}")
+                    for elem in elements[:10]:  # 只檢查前10個
+                        text = elem.get_text().strip()
+                        link = elem.get('href', '')
+                        
+                        if text and len(text) > 5:  # 過濾太短的文字
+                            has_keyword, found_keywords = self.contains_keywords(text)
+                            if has_keyword:
                                 announcements.append({
-                                    'title': title,
+                                    'title': text,
                                     'link': link,
-                                    'id': post_id,
-                                    'published': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                    'keywords': found_keywords,
+                                    'source': '幣安中文公告'
                                 })
-                        except Exception as e:
-                            logger.debug(f"解析公告項目時出錯: {e}")
                     break
             
-            if not announcements:
-                logger.warning("⚠️ 未能解析到任何公告")
-                
             return announcements
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ 網路請求錯誤: {e}")
-            return []
         except Exception as e:
-            logger.error(f"❌ 網頁解析錯誤: {e}")
+            logger.error(f"❌ 抓取幣安中文公告失敗: {e}")
             return []
     
-    def is_listing_announcement(self, title):
-        """判斷是否為重要的上幣公告"""
-        listing_keywords = [
-            'listing', 'new trading', 'adds', 'launches', 
-            'will list', 'support', 'trading pairs',
-            'opens trading', 'available for trading',
-            '上線', '新增', '支持', '開放交易'
-        ]
-        
-        important_keywords = [
-            'futures', 'margin', 'spot trading',
-            'airdrop', 'promotion', 'competition'
-        ]
-        
-        title_lower = title.lower()
-        
-        is_listing = any(keyword.lower() in title_lower for keyword in listing_keywords)
-        is_important = any(keyword.lower() in title_lower for keyword in important_keywords)
-        
-        return is_listing, is_important
+    def scrape_coingecko_chinese(self):
+        """抓取CoinGecko新幣"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(
+                'https://www.coingecko.com/zh/new-cryptocurrencies',
+                headers=headers,
+                timeout=15
+            )
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            new_coins = []
+            
+            # 查找新幣資訊
+            coin_elements = soup.select('.coin-name, .tw-text-gray-700, [class*="coin"]')[:5]
+            
+            for elem in coin_elements:
+                text = elem.get_text().strip()
+                if text and len(text) > 2:
+                    # 檢查是否可能與幣安相關
+                    if any(word in text.lower() for word in ['binance', 'bnb', '幣安']):
+                        new_coins.append({
+                            'title': f"新幣種發現: {text}",
+                            'link': 'https://www.coingecko.com/zh/new-cryptocurrencies',
+                            'keywords': ['新上線'],
+                            'source': 'CoinGecko'
+                        })
+            
+            return new_coins
+            
+        except Exception as e:
+            logger.error(f"❌ 抓取CoinGecko失敗: {e}")
+            return []
     
-    def format_message(self, announcement):
-        """格式化Telegram訊息"""
-        title = announcement['title']
-        link = announcement['link']
-        pub_date = announcement['published']
+    def format_alert_message(self, item):
+        """格式化警報訊息"""
+        title = item['title']
+        link = item.get('link', '')
+        keywords = item.get('keywords', [])
+        source = item.get('source', '未知')
         
-        is_listing, is_important = self.is_listing_announcement(title)
-        
-        if is_listing:
-            emoji = "🚀"
-            priority_text = "\n\n🔥 <b>新幣上線公告！立即查看！</b>"
-        elif is_important:
-            emoji = "⭐"
-            priority_text = "\n\n💡 <b>重要公告</b>"
-        else:
-            emoji = "📢"
-            priority_text = ""
+        # 添加完整URL
+        if link and not link.startswith('http'):
+            if 'binance' in source.lower():
+                link = f"https://www.binance.com{link}"
         
         message = f"""
-{emoji} <b>幣安新公告 (網頁監控)</b>
+🚨 <b>發現上線相關內容！</b>
 
 📋 <b>標題:</b> {title}
 
-🔗 <a href="{link}">查看完整公告</a>
+🔍 <b>關鍵字:</b> {', '.join(keywords)}
+📍 <b>來源:</b> {source}
 
-⏰ <b>發現時間:</b> {pub_date}{priority_text}
+{f'🔗 <b>連結:</b> {link}' if link else ''}
+
+⏰ <b>發現時間:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """.strip()
         
         return message
     
-    def check_new_posts(self):
-        """檢查是否有新公告"""
-        announcements = self.scrape_announcements()
-        if not announcements:
-            return []
+    def check_all_sources(self):
+        """檢查所有來源"""
+        all_findings = []
         
-        new_posts = []
-        for announcement in announcements:
-            post_id = str(announcement['id'])
-            
-            if post_id not in self.seen_posts:
-                new_posts.append(announcement)
-                self.seen_posts.add(post_id)
-                logger.info(f"📢 發現新公告: {announcement['title'][:60]}...")
+        # 檢查幣安中文公告
+        try:
+            binance_items = self.scrape_binance_chinese()
+            for item in binance_items:
+                # 生成唯一ID
+                item_id = f"binance_{hash(item['title'])}"
+                if item_id not in self.seen_posts:
+                    all_findings.append(item)
+                    self.seen_posts.add(item_id)
+                    logger.info(f"🎯 發現新內容: {item['title'][:50]}...")
+        except Exception as e:
+            logger.error(f"檢查幣安公告時出錯: {e}")
         
-        return new_posts
+        # 檢查CoinGecko
+        try:
+            gecko_items = self.scrape_coingecko_chinese()
+            for item in gecko_items:
+                item_id = f"gecko_{hash(item['title'])}"
+                if item_id not in self.seen_posts:
+                    all_findings.append(item)
+                    self.seen_posts.add(item_id)
+                    logger.info(f"🎯 發現新幣種: {item['title'][:50]}...")
+        except Exception as e:
+            logger.error(f"檢查CoinGecko時出錯: {e}")
+        
+        return all_findings
     
     def run_once(self):
         """執行一次檢查"""
         logger.info(f"🔍 開始檢查 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        new_posts = self.check_new_posts()
+        findings = self.check_all_sources()
         
-        if new_posts:
-            logger.info(f"📢 發現 {len(new_posts)} 篇新公告")
+        if findings:
+            logger.info(f"🎯 發現 {len(findings)} 個相關內容")
             
-            for post in new_posts:
-                message = self.format_message(post)
+            for item in findings:
+                message = self.format_alert_message(item)
                 if self.send_telegram_message(message):
-                    time.sleep(1)
+                    time.sleep(2)  # 避免頻率限制
                 else:
-                    logger.error(f"發送失敗: {post['title']}")
+                    logger.error(f"發送失敗: {item['title']}")
             
             self.save_seen_posts()
         else:
-            logger.info("✅ 沒有新公告")
+            logger.info("✅ 沒有發現相關的上線內容")
+    
+    def test_telegram_connection(self):
+        """測試Telegram連接"""
+        test_message = f"""
+🧪 <b>Telegram連接測試 (中文內容監控)</b>
+
+✅ Bot運行正常
+📅 測試時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+🔍 監控關鍵字: {', '.join(self.keywords[:5])}...
+📍 監控來源: 幣安中文公告、CoinGecko等
+
+🤖 準備開始監控"上線"相關內容！
+        """.strip()
+        
+        logger.info("🔍 測試Telegram連接...")
+        return self.send_telegram_message(test_message)
     
     def run_daemon(self):
         """持續監控模式"""
-        logger.info(f"🤖 Bot開始運行 (網頁解析版)！")
-        logger.info(f"⏰ 每 {self.check_interval} 秒檢查一次")
-        logger.info("按 Ctrl+C 停止運行")
+        logger.info("🤖 Bot開始運行 (中文內容監控版)！")
         
         start_msg = f"""
-🤖 <b>幣安監控Bot已啟動 (網頁解析版)</b>
+🤖 <b>中文內容監控Bot已啟動</b>
 
 ⏰ 檢查間隔: {self.check_interval}秒
-🌐 監控方式: 網頁解析
-🎯 專注: 新幣上線公告
+🔍 監控關鍵字: {', '.join(self.keywords[:5])}等
+📍 監控來源: 多個中文平台
 
-準備開始監控...
+🎯 專門監控"上線"相關內容
+開始監控...
         """.strip()
         
         self.send_telegram_message(start_msg)
@@ -292,53 +345,32 @@ class BinanceWebScraperBot:
         try:
             while True:
                 self.run_once()
-                logger.debug(f"💤 等待 {self.check_interval} 秒...")
                 time.sleep(self.check_interval)
-                
         except KeyboardInterrupt:
-            logger.info("\n🛑 收到停止信號")
-            stop_msg = "🛑 <b>幣安監控Bot已停止運行</b>"
-            self.send_telegram_message(stop_msg)
-            logger.info("👋 Bot已安全停止")
-            
-        except Exception as e:
-            logger.error(f"❌ 運行時發生錯誤: {e}")
-            error_msg = f"❌ <b>Bot運行異常</b>\n\n錯誤: {str(e)}"
-            self.send_telegram_message(error_msg)
+            logger.info("🛑 Bot已停止")
+            self.send_telegram_message("🛑 <b>中文內容監控Bot已停止</b>")
 
 def main():
     """主函數"""
-    parser = argparse.ArgumentParser(description='幣安公告監控Bot (網頁解析版)')
-    parser.add_argument('--test', action='store_true', 
-                       help='測試模式：只執行一次檢查')
-    parser.add_argument('--test-bot', action='store_true', 
-                       help='測試Telegram連接')
+    parser = argparse.ArgumentParser(description='幣安中文內容監控Bot')
+    parser.add_argument('--test', action='store_true', help='測試模式')
+    parser.add_argument('--test-bot', action='store_true', help='測試連接')
     
     args = parser.parse_args()
     
     try:
-        bot = BinanceWebScraperBot()
+        bot = BinanceChineseMonitor()
         
         if args.test_bot:
-            if bot.test_telegram_connection():
-                print("✅ 測試完成：Telegram連接正常")
-            else:
-                print("❌ 測試失敗：請檢查設定")
-            return
-        
-        if args.test:
-            print("🧪 執行測試模式...")
+            success = bot.test_telegram_connection()
+            print("✅ 測試成功" if success else "❌ 測試失敗")
+        elif args.test:
             bot.run_once()
-            print("✅ 測試完成")
         else:
             bot.run_daemon()
             
-    except KeyboardInterrupt:
-        logger.info("👋 程式被使用者中斷")
     except Exception as e:
-        logger.error(f"❌ 程式啟動失敗: {e}")
-        print(f"❌ 錯誤: {e}")
-        print("💡 請檢查設定")
+        logger.error(f"❌ 程式錯誤: {e}")
 
 if __name__ == "__main__":
     main()
