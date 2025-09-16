@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-幣安RSS監控Telegram Bot
-即時監控幣安公告並推送到Telegram
-
-使用方法:
-python main.py              # 持續監控
-python main.py --test       # 測試一次
-python main.py --test-bot   # 測試Telegram連接
+幣安公告監控Telegram Bot (Web Scraping版本)
+由於RSS不可用，改用網頁解析方式
 """
 
 import requests
-import feedparser
+from bs4 import BeautifulSoup
 import time
 import json
 import os
@@ -30,8 +25,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BinanceRSSBot:
-    """幣安RSS監控Bot"""
+class BinanceWebScraperBot:
+    """幣安公告監控Bot (網頁解析版)"""
     
     def __init__(self):
         """初始化Bot"""
@@ -39,13 +34,15 @@ class BinanceRSSBot:
             Config.validate()
             self.telegram_token = Config.TELEGRAM_BOT_TOKEN
             self.chat_id = Config.TELEGRAM_CHAT_ID
-            self.rss_url = Config.RSS_URL
             self.check_interval = Config.CHECK_INTERVAL
+            
+            # 改用網頁URL
+            self.web_url = "https://www.binance.com/en/support/announcement/new-listing"
             self.seen_posts_file = "seen_posts.json"
             self.seen_posts = self.load_seen_posts()
             
-            logger.info("🤖 Bot初始化完成")
-            logger.info(f"📡 RSS URL: {self.rss_url}")
+            logger.info("🤖 Bot初始化完成 (網頁解析版)")
+            logger.info(f"🌐 監控網址: {self.web_url}")
             logger.info(f"⏰ 檢查間隔: {self.check_interval}秒")
             
         except Exception as e:
@@ -102,10 +99,11 @@ class BinanceRSSBot:
     def test_telegram_connection(self):
         """測試Telegram連接"""
         test_message = f"""
-🧪 <b>Telegram連接測試</b>
+🧪 <b>Telegram連接測試 (網頁解析版)</b>
 
 ✅ Bot運行正常
 📅 測試時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+🌐 改用網頁解析方式監控
 🤖 準備開始監控幣安公告！
         """.strip()
         
@@ -119,26 +117,74 @@ class BinanceRSSBot:
         
         return success
     
-    def fetch_rss_feed(self):
-        """獲取RSS feed內容"""
+    def scrape_announcements(self):
+        """抓取幣安公告頁面"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
         try:
-            logger.debug(f"📡 正在獲取RSS: {self.rss_url}")
-            feed = feedparser.parse(self.rss_url)
+            logger.debug(f"🌐 正在抓取網頁: {self.web_url}")
+            response = requests.get(self.web_url, headers=headers, timeout=15)
+            response.raise_for_status()
             
-            if not feed.entries:
-                logger.warning("⚠️ RSS feed為空或無法解析")
-                return []
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-            logger.debug(f"📄 獲取到 {len(feed.entries)} 篇文章")
-            return feed.entries
+            # 查找公告列表 (這部分需要根據實際HTML結構調整)
+            announcements = []
             
+            # 常見的公告容器選擇器
+            selectors = [
+                '.announcement-item',
+                '.news-item', 
+                'article',
+                '[class*="announcement"]',
+                '[class*="news"]'
+            ]
+            
+            for selector in selectors:
+                items = soup.select(selector)
+                if items:
+                    logger.info(f"📄 找到 {len(items)} 個公告項目 (使用選擇器: {selector})")
+                    for item in items[:10]:  # 只取前10個
+                        try:
+                            # 嘗試提取標題和連結
+                            title_elem = item.find(['h1', 'h2', 'h3', 'h4', 'a'])
+                            if title_elem:
+                                title = title_elem.get_text().strip()
+                                link = title_elem.get('href') if title_elem.name == 'a' else item.find('a')
+                                if link and hasattr(link, 'get'):
+                                    link = link.get('href')
+                                if link and not link.startswith('http'):
+                                    link = f"https://www.binance.com{link}"
+                                
+                                # 簡單的ID生成
+                                post_id = hash(title + str(link))
+                                
+                                announcements.append({
+                                    'title': title,
+                                    'link': link,
+                                    'id': post_id,
+                                    'published': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                })
+                        except Exception as e:
+                            logger.debug(f"解析公告項目時出錯: {e}")
+                    break
+            
+            if not announcements:
+                logger.warning("⚠️ 未能解析到任何公告")
+                
+            return announcements
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ 網路請求錯誤: {e}")
+            return []
         except Exception as e:
-            logger.error(f"❌ RSS獲取失敗: {e}")
+            logger.error(f"❌ 網頁解析錯誤: {e}")
             return []
     
     def is_listing_announcement(self, title):
         """判斷是否為重要的上幣公告"""
-        # 新幣上線關鍵字
         listing_keywords = [
             'listing', 'new trading', 'adds', 'launches', 
             'will list', 'support', 'trading pairs',
@@ -146,7 +192,6 @@ class BinanceRSSBot:
             '上線', '新增', '支持', '開放交易'
         ]
         
-        # 重要公告關鍵字
         important_keywords = [
             'futures', 'margin', 'spot trading',
             'airdrop', 'promotion', 'competition'
@@ -159,15 +204,14 @@ class BinanceRSSBot:
         
         return is_listing, is_important
     
-    def format_message(self, entry):
+    def format_message(self, announcement):
         """格式化Telegram訊息"""
-        title = entry.title
-        link = entry.link
-        pub_date = getattr(entry, 'published', '未知時間')
+        title = announcement['title']
+        link = announcement['link']
+        pub_date = announcement['published']
         
         is_listing, is_important = self.is_listing_announcement(title)
         
-        # 選擇表情符號
         if is_listing:
             emoji = "🚀"
             priority_text = "\n\n🔥 <b>新幣上線公告！立即查看！</b>"
@@ -179,32 +223,31 @@ class BinanceRSSBot:
             priority_text = ""
         
         message = f"""
-{emoji} <b>幣安新公告</b>
+{emoji} <b>幣安新公告 (網頁監控)</b>
 
 📋 <b>標題:</b> {title}
 
 🔗 <a href="{link}">查看完整公告</a>
 
-⏰ <b>發布時間:</b> {pub_date}{priority_text}
+⏰ <b>發現時間:</b> {pub_date}{priority_text}
         """.strip()
         
         return message
     
     def check_new_posts(self):
-        """檢查是否有新文章"""
-        entries = self.fetch_rss_feed()
-        if not entries:
+        """檢查是否有新公告"""
+        announcements = self.scrape_announcements()
+        if not announcements:
             return []
         
         new_posts = []
-        for entry in entries:
-            # 使用link作為唯一ID
-            post_id = entry.link
+        for announcement in announcements:
+            post_id = str(announcement['id'])
             
             if post_id not in self.seen_posts:
-                new_posts.append(entry)
+                new_posts.append(announcement)
                 self.seen_posts.add(post_id)
-                logger.info(f"📢 發現新文章: {entry.title[:60]}...")
+                logger.info(f"📢 發現新公告: {announcement['title'][:60]}...")
         
         return new_posts
     
@@ -217,13 +260,12 @@ class BinanceRSSBot:
         if new_posts:
             logger.info(f"📢 發現 {len(new_posts)} 篇新公告")
             
-            # 按發布時間排序（最舊的先發）
-            for post in reversed(new_posts):
+            for post in new_posts:
                 message = self.format_message(post)
                 if self.send_telegram_message(message):
-                    time.sleep(1)  # 避免頻率限制
+                    time.sleep(1)
                 else:
-                    logger.error(f"發送失敗: {post.title}")
+                    logger.error(f"發送失敗: {post['title']}")
             
             self.save_seen_posts()
         else:
@@ -231,16 +273,15 @@ class BinanceRSSBot:
     
     def run_daemon(self):
         """持續監控模式"""
-        logger.info(f"🤖 Bot開始運行！")
+        logger.info(f"🤖 Bot開始運行 (網頁解析版)！")
         logger.info(f"⏰ 每 {self.check_interval} 秒檢查一次")
         logger.info("按 Ctrl+C 停止運行")
         
-        # 發送啟動通知
         start_msg = f"""
-🤖 <b>幣安監控Bot已啟動</b>
+🤖 <b>幣安監控Bot已啟動 (網頁解析版)</b>
 
 ⏰ 檢查間隔: {self.check_interval}秒
-📡 監控來源: 幣安官方公告
+🌐 監控方式: 網頁解析
 🎯 專注: 新幣上線公告
 
 準備開始監控...
@@ -267,7 +308,7 @@ class BinanceRSSBot:
 
 def main():
     """主函數"""
-    parser = argparse.ArgumentParser(description='幣安RSS監控Telegram Bot')
+    parser = argparse.ArgumentParser(description='幣安公告監控Bot (網頁解析版)')
     parser.add_argument('--test', action='store_true', 
                        help='測試模式：只執行一次檢查')
     parser.add_argument('--test-bot', action='store_true', 
@@ -276,10 +317,9 @@ def main():
     args = parser.parse_args()
     
     try:
-        bot = BinanceRSSBot()
+        bot = BinanceWebScraperBot()
         
         if args.test_bot:
-            # 測試Telegram連接
             if bot.test_telegram_connection():
                 print("✅ 測試完成：Telegram連接正常")
             else:
@@ -287,12 +327,10 @@ def main():
             return
         
         if args.test:
-            # 測試模式
             print("🧪 執行測試模式...")
             bot.run_once()
             print("✅ 測試完成")
         else:
-            # 正常運行模式
             bot.run_daemon()
             
     except KeyboardInterrupt:
@@ -300,7 +338,7 @@ def main():
     except Exception as e:
         logger.error(f"❌ 程式啟動失敗: {e}")
         print(f"❌ 錯誤: {e}")
-        print("💡 請檢查 .env 檔案是否正確設定")
+        print("💡 請檢查設定")
 
 if __name__ == "__main__":
     main()
