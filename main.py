@@ -37,16 +37,14 @@ class EnhancedBinanceMonitor:
             self.chat_id = Config.TELEGRAM_CHAT_ID
             self.check_interval = Config.CHECK_INTERVAL
             
-            # 多個可能的網址
+            # 只監控你指定的正確網址
             self.target_urls = [
-                'https://www.binance.com/zh-TC/support/announcement/list/48',
-                'https://www.binance.com/zh-TC/support/announcement',
-                'https://www.binance.com/zh-TC/support/announcement/new-listing'
+                'https://www.binance.com/zh-TC/support/announcement/list/48'
             ]
             
             # 關鍵字
             self.keywords = [
-                '上線', '新上線', '即將上線', '開始交易', 
+                '上線','槓桿上線','槓桿', '新上線', '即將上線', '開始交易', 
                 '新增', '支持', '開放', '推出', '啟動',
                 'listing', 'new trading', 'support', 'launch'
             ]
